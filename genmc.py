@@ -10,7 +10,7 @@
 __author__ = "Dennis Elser"
 
 # -----------------------------------------------------------------------------
-import os, shutil, errno
+import os, shutil, errno, re
 
 import ida_idaapi
 import ida_bytes
@@ -23,6 +23,7 @@ import ida_ida
 import ida_graph
 import ida_lines
 import ida_moves
+from ida_pro import IDA_SDK_VERSION
 
 PLUGIN_NAME = "genmc"
 
@@ -82,7 +83,7 @@ def install_plugin():
     kw.msg("Copying script from \"%s\" to \"%s\" ..." % (src, usrdir))
     if not os.path.exists(usrdir):
         try:
-            os.path.makedirs(usrdir)
+            os.makedirs(usrdir)
         except OSError as e:
             if e.errno != errno.EEXIST:
                 kw.msg("failed (mkdir)!\n")
@@ -97,25 +98,14 @@ def install_plugin():
     return True
 
 # -----------------------------------------------------------------------------
-def is_ida_version(requested):
-    """Checks minimum required IDA version."""
-    rv = requested.split(".")
-    kv = kw.get_kernel_version().split(".")
-
-    count = min(len(rv), len(kv))
-    if not count:
-        return False
-
-    for i in xrange(count):
-        if int(kv[i]) < int(rv[i]):
-            return False
-    return True
+def is_ida_version(min_ver_required):
+    return IDA_SDK_VERSION >= min_ver_required
 
 # -----------------------------------------------------------------------------
 def is_compatible():
     """Checks whether script is compatible with current IDA and
     decompiler versions."""
-    min_ida_ver = "7.3"
+    min_ida_ver = 730
     return is_ida_version(min_ida_ver) and hr.init_hexrays_plugin()
 
 # -----------------------------------------------------------------------------
@@ -148,7 +138,7 @@ class microcode_insnviewer_t(ida_graph.GraphViewer):
         return curr
 
     def _insert_mop(self, mop, parent):
-        if mop.t == 0:
+        if mop.t == hr.mop_z:
             return -1
 
         text = get_mopt_name(mop.t) + '\n' + mop._print()
@@ -191,13 +181,32 @@ class microcode_insnviewer_t(ida_graph.GraphViewer):
 # -----------------------------------------------------------------------------
 class microcode_graphviewer_t(ida_graph.GraphViewer):
     """Displays the graph view of Hex-Rays microcode."""
-    def __init__(self, mba, title):
+    def __init__(self, mba, title, lines):
         title = "Microcode graph: %s" % title
         ida_graph.GraphViewer.__init__(self, title, True)
         self._mba = mba
         self._mba.set_mba_flags(hr.MBA_SHORT)
+        self._process_lines(lines)
         if mba.maturity == hr.MMAT_GENERATED or mba.maturity == hr.MMAT_PREOPTIMIZED:
             mba.build_graph()
+    
+    def _process_lines(self, lines):
+        self._blockcmts = {}
+        curblk = "-1"
+        self._blockcmts[curblk] = []
+        for i, line in enumerate(lines):
+            plain_line = ida_lines.tag_remove(line).lstrip()
+            if plain_line.startswith(';'):
+                # msg("%s" % plain_line)
+                re_ret = re.findall("BLOCK ([0-9]+) ", plain_line)
+                if len(re_ret) > 0:
+                    curblk = re_ret[0]
+                    self._blockcmts[curblk] = [line]
+                else:
+                    self._blockcmts[curblk].append(line)
+        if "0" in self._blockcmts:
+            self._blockcmts["0"] = self._blockcmts["-1"] + self._blockcmts["0"]
+        del self._blockcmts["-1"]
 
     def OnRefresh(self):
         self.Clear()
@@ -214,7 +223,12 @@ class microcode_graphviewer_t(ida_graph.GraphViewer):
         mblock = self._mba.get_mblock(node)
         vp = hr.qstring_printer_t(None, True)
         mblock._print(vp)
-        return vp.s
+        
+        node_key = "%d" % node
+        if node_key in self._blockcmts:
+            return ''.join(self._blockcmts[node_key]) + vp.s
+        else:
+            return vp.s
 
 # -----------------------------------------------------------------------------
 class microcode_viewer_t(kw.simplecustviewer_t):
@@ -226,6 +240,7 @@ class microcode_viewer_t(kw.simplecustviewer_t):
         self.fn_name = fn_name
         if not kw.simplecustviewer_t.Create(self, self.title):
             return False
+        self.lines = lines
         for line in lines:
             self.AddLine(line)
         return True
@@ -255,7 +270,7 @@ class microcode_viewer_t(kw.simplecustviewer_t):
     registering an "action" and assigning it a hotkey"""
     def OnKeydown(self, vkey, shift):
         if vkey == ord("G"):
-            g = microcode_graphviewer_t(self._mba, self.title)
+            g = microcode_graphviewer_t(self._mba, self.title, self.lines)
             if g:
                 g.Show()
                 self._fit_graph(g)
@@ -347,14 +362,15 @@ def show_microcode():
     pfn = ida_funcs.get_func(kw.get_screen_ea())
     if not sel and not pfn:
         return (False, "Position cursor within a function or select range")
-    
+
     if not sel and pfn:
         sea = pfn.start_ea
         eea = pfn.end_ea
 
     addr_fmt = "%016x" if ida_ida.inf_is_64bit() else "%08x"
-    fn_name = (ida_funcs.get_func_name(pfn.start_ea) 
+    fn_name = (ida_funcs.get_func_name(pfn.start_ea)
         if pfn else "0x%s-0x%s" % (addr_fmt % sea, addr_fmt % eea))
+
     F = ida_bytes.get_flags(sea)
     if not ida_bytes.is_code(F):
         return (False, "The selected range must start with an instruction")
@@ -362,19 +378,23 @@ def show_microcode():
     text, mmat, mba_flags = ask_desired_maturity()
     if text is None and mmat is None:
         return (True, "Cancelled")
+    
+    if not sel and pfn:
+        mbr = hr.mba_ranges_t(pfn)
+    else:
+        mbr = hr.mba_ranges_t()
+        mbr.ranges.push_back(ida_range.range_t(sea, eea))
 
     hf = hr.hexrays_failure_t()
-    mbr = hr.mba_ranges_t()
-    mbr.ranges.push_back(ida_range.range_t(sea, eea))
     ml = hr.mlist_t()
     mba = hr.gen_microcode(mbr, hf, ml, hr.DECOMP_WARNINGS, mmat)
     if not mba:
-        return (False, "0x%s: %s" % (addr_fmt % hf.errea, hf.str))
+        return (False, "0x%s: %s" % (addr_fmt % hf.errea, hf.desc()))
     vp = printer_t()
-    mba.set_mba_flags(mba_flags)
+    mba.set_mba_flags(mba.get_mba_flags() | mba_flags)
     mba._print(vp)
     mcv = microcode_viewer_t()
-    if not mcv.Create(mba, "0x%s-0x%s (%s)" % (addr_fmt % sea, addr_fmt % eea, text), text, fn_name, vp.get_mc()):
+    if not mcv.Create(mba, "%s (%s)" % (fn_name, text), text, fn_name, vp.get_mc()):
         return (False, "Error creating viewer")
 
     mcv.Show()

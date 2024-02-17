@@ -15,6 +15,8 @@ the plugins menu or by using the hotkey 'Ctrl-Shift-M'.
 
 IDA and decompilers >= 7.3 are required.
 
+This IDAPython project is compatible with Python3. For compatibility with older versions of IDA, you may want to check out the Python2 branch of this project.
+
 ## Keyboard shortcuts/modifiers:
 With the microcode viewer focussed:
 
@@ -26,3 +28,5 @@ With the microcode viewer focussed:
 - https://github.com/RolfRolles/ for his Microcode Explorer plugin whose original ideas and code this script is heavily based on (https://github.com/RolfRolles/HexRaysDeob). Full credit for most of the code and ideas in its original form belongs to Rolf. Check out his related blog post on Hexblog: http://www.hexblog.com/?p=1248 
 - https://github.com/NeatMonster/ for porting of the Microcode Explorer C++ code to IDAPython using ctypes when Python bindings for HexRays' microcode were not available yet (https://github.com/NeatMonster/MCExplorer).
 - https://github.com/icecr4ck/ for porting MCExplorer for IDAPython from 7.x to 7.3
+
+Please consider using [Lucid - An Interactive Hex-Rays Microcode Explorer](https://github.com/gaasedelen/lucid), instead!
